@@ -1,5 +1,6 @@
 /*
  *
+ *    Copyright (c) 2018 Google LLC.
  *    Copyright (c) 2013-2017 Nest Labs, Inc.
  *    All rights reserved.
  *
@@ -41,6 +42,16 @@ using namespace nl::Weave::Profiles::Security;
 using namespace nl::Weave::Profiles::Security::PASE;
 using System::PacketBuffer;
 
+typedef struct
+{
+    WeavePASEEngine  initiatorEng;
+    WeavePASEEngine  responderEng;
+    WeaveFabricState initFabricState;
+    WeaveFabricState respFabricState;
+} PASEEngineTestContext;
+
+static MessageMutator sNullMutator;
+
 #define TOOL_NAME "TestPASE"
 const char * INITIATOR_STEP_1 = "InitiatorStep1";
 const char * RESPONDER_RECONFIGURE = "ResponderReconfigure";
@@ -73,13 +84,12 @@ do { \
 
 void MessageMutator::MutateMessage(const char *msgName, PacketBuffer *msgBuf) { }
 
-static MessageMutator gNullMutator;
-
 MessageExternalFuzzer::MessageExternalFuzzer(const char *msgType)
 {
     mMsgType = msgType;
     mSaveCorpus = false;
 }
+
 void MessageExternalFuzzer::MutateMessage(const char *msgType, PacketBuffer *msgBuf)
 {
     if (strcmp(msgType, mMsgType) == 0)
@@ -116,7 +126,7 @@ PASEEngineTest::PASEEngineTest(const char *testName)
     mExpectReconfig = false;
     mForceRepeatedReconfig = false;
     memset(mExpectedErrors, 0, sizeof(mExpectedErrors));
-    mMutator = &gNullMutator;
+    mMutator = &sNullMutator;
     mLogMessageData = false;
 }
 
@@ -234,18 +244,14 @@ enum
 };
 
 //end PASEEngineTest Initialization
-void PASEEngineTest::Run()
+void PASEEngineTest::Run(void)
 {
+    PASEEngineTestContext *lContext;
     WEAVE_ERROR err;
-    WeavePASEEngine initiatorEng;
-    WeavePASEEngine responderEng;
     PacketBuffer *msgBuf = NULL;
     PacketBuffer *msgBuf2 = NULL;
-    WeaveFabricState initFabricState;
-    WeaveFabricState respFabricState;
     const WeaveEncryptionKey *initiatorKey;
     const WeaveEncryptionKey *responderKey;
-
     uint64_t initNodeId = 1;
     uint64_t respNodeId = 2;
     uint16_t sessionKeyId = sTestDefaultSessionKeyId;
@@ -258,26 +264,31 @@ void PASEEngineTest::Run()
         printf("========== Starting Test: %s\n", TestName());
         printf("Pr: %d\nex: %d\n", ProposedConfig(), ExpectedConfig());
     }
-    initiatorEng.Init();
-    err = initFabricState.Init();
+
+    lContext = new PASEEngineTestContext;
+    VerifyOrQuit(lContext != NULL, "Failed to allocate test context\n");
+
+    lContext->initiatorEng.Init();
+    err = lContext->initFabricState.Init();
     SuccessOrQuit(err, "initFabricState.Init failed\n");
-    initiatorEng.Pw = (const uint8_t *)mInitPW;
-    initiatorEng.PwLen = (uint16_t)strlen(mInitPW);
+
+    lContext->initiatorEng.Pw = (const uint8_t *)mInitPW;
+    lContext->initiatorEng.PwLen = (uint16_t)strlen(mInitPW);
 
 onReconfig:
-    responderEng.Init();
-    err = respFabricState.Init();
-    setAllowedResponderConfigs(responderEng);
+    lContext->responderEng.Init();
+    err = lContext->respFabricState.Init();
+    setAllowedResponderConfigs(lContext->responderEng);
 
     SuccessOrQuit(err, "respFabricState.Init failed\n");
-    respFabricState.PairingCode = mRespPW;
+    lContext->respFabricState.PairingCode = mRespPW;
 
     // =========== Start PASE InitiatorStep1 ==============================
     msgBuf = PacketBuffer::New();
     VerifyOrQuit(msgBuf != NULL, "PacketBuffer::New() failed");
 
     // Initiator generates and sends PASE Initiator Step 1 message.
-    err = initiatorEng.GenerateInitiatorStep1(msgBuf, ProposedConfig(), initNodeId, respNodeId, sessionKeyId, encType, pwSrc, &initFabricState, mConfirmKey);
+    err = lContext->initiatorEng.GenerateInitiatorStep1(msgBuf, ProposedConfig(), initNodeId, respNodeId, sessionKeyId, encType, pwSrc, &lContext->initFabricState, mConfirmKey);
 
     if (IsExpectedError("Initiator:GenerateInitiatorStep1", err))
         goto onExpectedError;
@@ -293,7 +304,7 @@ onReconfig:
     }
 
     // =========== Responder Processes PASE InitiatorStep1 ================
-    err = responderEng.ProcessInitiatorStep1(msgBuf, respNodeId, initNodeId, &respFabricState);
+    err = lContext->responderEng.ProcessInitiatorStep1(msgBuf, respNodeId, initNodeId, &lContext->respFabricState);
     if (IsExpectedError(INITIATOR_STEP_1, err))
         goto onExpectedError;
 
@@ -306,10 +317,10 @@ onReconfig:
         // =========== Responder generates PASE ResponderReconfigMessage ==
         {
             msgBuf = PacketBuffer::New();
-            err = responderEng.GenerateResponderReconfigure(msgBuf);
+            err = lContext->responderEng.GenerateResponderReconfigure(msgBuf);
             SuccessOrQuit(err, "WeavePASEEngine::GenerateResponderReconfigure failed\n");
             // Reset PASE Engines
-            responderEng.Reset();
+            lContext->responderEng.Reset();
         }
             // ========== Responder sends ResponderReconfig Message ============
         mMutator->MutateMessage(RESPONDER_RECONFIGURE, msgBuf);
@@ -323,7 +334,7 @@ onReconfig:
         // =========== Initiator processes PASE ResponderReconfig =========
         {
             uint32_t tempProposedConfig = mProposedConfig;
-            err = initiatorEng.ProcessResponderReconfigure(msgBuf, mProposedConfig);
+            err = lContext->initiatorEng.ProcessResponderReconfigure(msgBuf, mProposedConfig);
             if (IsExpectedError("Initiator:ProcessResponderReconfigure", err))
             {
                 mProposedConfig = tempProposedConfig;
@@ -334,7 +345,7 @@ onReconfig:
             msgBuf = NULL;
         }
 
-        respFabricState.Shutdown();
+        lContext->respFabricState.Shutdown();
         mExpectReconfig = false;
 
         goto onReconfig;
@@ -350,12 +361,12 @@ onReconfig:
     // =========== Responder Generates ResponderStep1 and ResponderStep2 ==
     {
         msgBuf = PacketBuffer::New();
-        err = responderEng.GenerateResponderStep1(msgBuf);
+        err = lContext->responderEng.GenerateResponderStep1(msgBuf);
         SuccessOrQuit(err, "WeavePASEEngine::GenerateResponderStep1 failed\n");
 
         // Responder generates and sends PASE Responder Step 2 message.
         msgBuf2 = PacketBuffer::New();
-        err = responderEng.GenerateResponderStep2(msgBuf2);
+        err = lContext->responderEng.GenerateResponderStep2(msgBuf2);
         SuccessOrQuit(err, "WeavePASEEngine::GenerateResponderStep2 failed\n");
     }
     // =========== Responder sends ResponderStep1 ==========================
@@ -379,7 +390,7 @@ onReconfig:
     // =========== Initator Parses ResponderStep1 and ResponderStep2 ======
     {
         // Initiator receives and processes PASE Responder Step 1 message.
-        err = initiatorEng.ProcessResponderStep1(msgBuf);
+        err = lContext->initiatorEng.ProcessResponderStep1(msgBuf);
         if (IsExpectedError(RESPONDER_STEP_1, err))
             goto onExpectedError;
         SuccessOrQuit(err, "WeavePASEEngine::ProcessResponderStep1 failed\n");
@@ -387,7 +398,7 @@ onReconfig:
         msgBuf = NULL;
 
         // Initiator receives and processes PASE Responder Step 2 message.
-        err = initiatorEng.ProcessResponderStep2(msgBuf2);
+        err = lContext->initiatorEng.ProcessResponderStep2(msgBuf2);
         if (IsExpectedError(RESPONDER_STEP_2, err))
             goto onExpectedError;
         SuccessOrQuit(err, "WeavePASEEngine::ProcessResponderStep2 failed\n");
@@ -398,7 +409,7 @@ onReconfig:
     // =========== Initator Generates InitatorStep2 ===========================
     {
         msgBuf = PacketBuffer::New();
-        err = initiatorEng.GenerateInitiatorStep2(msgBuf);
+        err = lContext->initiatorEng.GenerateInitiatorStep2(msgBuf);
         SuccessOrQuit(err, "WeavePASEEngine::GenerateInitiatorStep2 failed\n");
     }
     //=========== Initator Sends InitatorStep2 ============================
@@ -413,7 +424,7 @@ onReconfig:
 
     // =========== Responder Parses InitatorStep2 =========================
     {
-        err = responderEng.ProcessInitiatorStep2(msgBuf);
+        err = lContext->responderEng.ProcessInitiatorStep2(msgBuf);
         PacketBuffer::Free(msgBuf);
         msgBuf = NULL;
 
@@ -434,7 +445,7 @@ onReconfig:
         // ========== Responder Forms ResponderKeyConfirm =================
         {
             msgBuf = PacketBuffer::New();
-            err = responderEng.GenerateResponderKeyConfirm(msgBuf);
+            err = lContext->responderEng.GenerateResponderKeyConfirm(msgBuf);
             SuccessOrQuit(err, "WeavePASEEngine::GenerateResponderKeyConfirm failed\n");
         }
 
@@ -450,7 +461,7 @@ onReconfig:
 
         // ========== Initiator Processes ResponderKeyConfirm =============
         {
-            err = initiatorEng.ProcessResponderKeyConfirm(msgBuf);
+            err = lContext->initiatorEng.ProcessResponderKeyConfirm(msgBuf);
 
             if (IsExpectedError(RESPONDER_KEY_CONFIRM, err))
                 goto onExpectedError;
@@ -461,17 +472,17 @@ onReconfig:
         }
     }
 
-    VerifyOrQuit(initiatorEng.State == WeavePASEEngine::kState_InitiatorDone, "Initiator state != Done\n");
-    VerifyOrQuit(responderEng.State == WeavePASEEngine::kState_ResponderDone, "Responder state != Done\n");
+    VerifyOrQuit(lContext->initiatorEng.State == WeavePASEEngine::kState_InitiatorDone, "Initiator state != Done\n");
+    VerifyOrQuit(lContext->responderEng.State == WeavePASEEngine::kState_ResponderDone, "Responder state != Done\n");
 
-    VerifyOrQuit(initiatorEng.SessionKeyId == responderEng.SessionKeyId, "Initiator SessionKeyId != Responder SessionKeyId\n");
-    VerifyOrQuit(initiatorEng.EncryptionType == responderEng.EncryptionType, "Initiator EncryptionType != Responder EncryptionType\n");
-    VerifyOrQuit(initiatorEng.PerformKeyConfirmation == responderEng.PerformKeyConfirmation, "Initiator SessionKeyId != Responder SessionKeyId\n");
+    VerifyOrQuit(lContext->initiatorEng.SessionKeyId == lContext->responderEng.SessionKeyId, "Initiator SessionKeyId != Responder SessionKeyId\n");
+    VerifyOrQuit(lContext->initiatorEng.EncryptionType == lContext->responderEng.EncryptionType, "Initiator EncryptionType != Responder EncryptionType\n");
+    VerifyOrQuit(lContext->initiatorEng.PerformKeyConfirmation == lContext->responderEng.PerformKeyConfirmation, "Initiator SessionKeyId != Responder SessionKeyId\n");
 
-    err = initiatorEng.GetSessionKey(initiatorKey);
+    err = lContext->initiatorEng.GetSessionKey(initiatorKey);
     SuccessOrQuit(err, "WeavePASEEngine::GetSessionKey() failed\n");
 
-    err = responderEng.GetSessionKey(responderKey);
+    err = lContext->responderEng.GetSessionKey(responderKey);
     SuccessOrQuit(err, "WeavePASEEngine::GetSessionKey() failed\n");
 
     VerifyOrQuit(memcmp(initiatorKey->AES128CTRSHA1.DataKey, responderKey->AES128CTRSHA1.DataKey, WeaveEncryptionKey_AES128CTRSHA1::DataKeySize) == 0,
@@ -480,9 +491,9 @@ onReconfig:
                  "Integrity key mismatch\n");
 
     // Shutdown the Initiator/Responder FabricState objects
-    err = initFabricState.Shutdown();
+    err = lContext->initFabricState.Shutdown();
     SuccessOrQuit(err, "initFabricState.Shutdown failed\n");
-    err = respFabricState.Shutdown();
+    err = lContext->respFabricState.Shutdown();
     SuccessOrQuit(err, "respFabricState.Shutdown failed\n");
 
 onExpectedError:
@@ -492,10 +503,13 @@ onExpectedError:
     PacketBuffer::Free(msgBuf2);
     msgBuf2 = NULL;
 
-    initiatorEng.Shutdown();
-    responderEng.Shutdown();
-    initFabricState.Shutdown();
-    respFabricState.Shutdown();
+    lContext->initiatorEng.Shutdown();
+    lContext->responderEng.Shutdown();
+    lContext->initFabricState.Shutdown();
+    lContext->respFabricState.Shutdown();
+
+    delete lContext;
+
     if (LogMessageData())
         printf("Test Complete: %s\n", TestName());
 }
